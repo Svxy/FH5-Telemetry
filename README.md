@@ -47,7 +47,7 @@ python main.py
 
 ### Or Use the Executable
 
-> Download the `.exe` from the [Releases](https://github.com/svxy/FH5-Telemetry/releases/download/v1.0.0.5/FH5%20Telemetry.exe) page.
+> Download the `.exe` from the [Releases](https://github.com/Svxy/FH5-Telemetry/releases/download/1.0.0.5/FH5.Telemetry.exe) page.
 
 1. Launch FH5 and enable telemetry over port `5607`
 2. Open **FH5 Telemetry**
