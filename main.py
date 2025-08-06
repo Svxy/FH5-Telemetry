@@ -1,6 +1,6 @@
 # FH5 Telemetry - by SneakyDev
 # View and Analyze Forza Horizon 5 Telemetry Data with Live Charts and CSV Logging
-# Version: 1.0.5
+# Version: 1.0.0.5
 # Date: 2025-07-05
 # License: MIT
 
