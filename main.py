@@ -1,3 +1,37 @@
+# FH5 Telemetry - by SneakyDev
+# View and Analyze Forza Horizon 5 Telemetry Data with Live Charts and CSV Logging
+# Version: 1.0.5
+# Date: 2025-07-05
+# License: MIT
+
+# This script captures Forza Horizon 5 telemetry data via UDP and visualizes it live with interactive charts.
+# It supports multiple telemetry categories (engine, suspension, braking, input, etc.), real-time data logging to CSV,
+# and replaying logged sessions with timeline scrolling.
+# The UI and general functionality are sort of inspired by my Snap-On Versus Edge scan tool, but with a focus on FH5 telemetry.
+
+# Credit to Jasperan for the original concept and core logic.
+# https://github.com/jasperan/forza-horizon-5-telemetry-listener
+
+# How it works:
+# - Listens for UDP packets sent by FH5 on port 5607.
+# - Parses raw binary data into structured properties.
+# - Buffers incoming data and updates live charts at regular intervals (80ms).
+# - Logs telemetry timestamps to CSV files when enabled.
+# - Allows users to open saved CSV files to analyze logged data.
+
+# Usage:
+# 1. Run this script or use compiled executable provided on GitHub.
+# 2. Ensure FH5 is running with telemetry output on port 5607.
+# 2. Click "Start" to begin capturing and viewing live telemetry.
+# 3. Optionally, toggle data logging to save to CSV files.
+# 4. Use "Stop" to halt data capture safely.
+# 5. Open saved logs via "Open Log" button to replay and analyze past sessions.
+
+# Requirements:
+# - Python 3.12+
+# - PySide6
+# - Forza Horizon 5
+
 import sys
 import socket
 import threading
@@ -8,7 +42,7 @@ from collections import deque
 from PySide6.QtCore import Qt, Signal, QObject, QMargins, QPointF, QTimer
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QTabWidget, QTextEdit, QGridLayout
+    QTabWidget, QLabel, QTextEdit, QLineEdit, QGridLayout, QSlider, QFileDialog
 )
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtGui import QPainter
@@ -177,17 +211,24 @@ class TelemetryChart(QWidget):
         self.axis_x = QValueAxis()
         self.axis_x.setLabelFormat("%d")
         self.axis_x.setTitleText("Sample #")
-        self.axis_x.setTickCount(7)
+        self.axis_x.setTickCount(5)
         self.chart.addAxis(self.axis_x, Qt.AlignBottom)
         self.series.attachAxis(self.axis_x)
 
         self.axis_y = QValueAxis()
         self.axis_y.setLabelFormat("%.2f")
         self.axis_y.setTitleText(self.title.replace('_', ' ').title())
+        self.axis_y.setTickCount(6)
         self.chart.addAxis(self.axis_y, Qt.AlignLeft)
         self.series.attachAxis(self.axis_y)
 
-        self.data = deque(maxlen=150)
+        self.buffer_len = 150
+        self.data = deque(maxlen=self.buffer_len)
+
+    def set_buffer_len(self, length):
+        self.buffer_len = length
+        old_data = list(self.data)[-length:]
+        self.data = deque(old_data, maxlen=self.buffer_len)
 
     def add_values(self, vals):
         self.data.extend(vals)
@@ -222,6 +263,7 @@ class ForzaTelemetryApp(QWidget):
         self.log_panel = QTextEdit()
         self.log_panel.setReadOnly(True)
         self.log_panel.setMaximumHeight(120)
+        self._auto_scroll = True
         self.log_panel.setStyleSheet("background-color: #222; color: #ccc; font-family: Consolas; font-size: 11px;")
         main_layout.addWidget(self.log_panel)
 
@@ -244,15 +286,33 @@ class ForzaTelemetryApp(QWidget):
 
         controls.addStretch()
 
+        label = QLabel("Sample Length:")
+        label.setAlignment(Qt.AlignLeft)
+        controls.addWidget(label)
+        self.buffer_len_input = QLineEdit("150")
+        self.buffer_len_input.setFixedWidth(60)
+        self.buffer_len_input.setPlaceholderText("Buf Len")
+        controls.addWidget(self.buffer_len_input)
+
+        self.btn_set_buflen = QPushButton("Apply")
+        self.btn_set_buflen.clicked.connect(self.update_buffer_len)
+        controls.addWidget(self.btn_set_buflen)
+
+        controls.addStretch()
+
         self.btn_clear_logs = QPushButton("Clear Logs")
         self.btn_clear_logs.clicked.connect(self.log_panel.clear)
         controls.addWidget(self.btn_clear_logs)
+        
+        self.btn_open_log = QPushButton("Open Log")
+        self.btn_open_log.clicked.connect(self.open_log_file)
+        controls.addWidget(self.btn_open_log)
 
         self.sample_count = 0
         self.data_buffer = {k: deque() for k in self.charts.keys()}
 
         self.update_timer = QTimer(self)
-        self.update_timer.setInterval(100)
+        self.update_timer.setInterval(80)
         self.update_timer.timeout.connect(self.flush_data_buffer)
 
         self.logging_enabled = False
@@ -263,7 +323,7 @@ class ForzaTelemetryApp(QWidget):
     def _setup_charts(self):
         self.categories = {
             "Engine / Speed": [
-                'current_engine_rpm', 'engine_idle_rpm', 'power', 'torque', 'speed'
+                'current_engine_rpm', 'engine_idle_rpm', 'power', 'torque', 'speed', 'boost'
             ],
             "Suspension": [
                 'norm_suspension_travel_FL', 'norm_suspension_travel_FR',
@@ -280,9 +340,8 @@ class ForzaTelemetryApp(QWidget):
                 'tire_temp_FL', 'tire_temp_FR',
                 'tire_temp_RL', 'tire_temp_RR'
             ],
-            "Position / Race": [
-                'position_x', 'position_y', 'position_z',
-                'lap_no', 'race_pos', 'cur_lap_time', 'cur_race_time'
+            "Position / Acceleration": [
+                'position_x', 'position_z', 'acceleration_x', 'acceleration_z', 'velocity_x', 'velocity_z'
             ]
         }
 
@@ -318,7 +377,8 @@ class ForzaTelemetryApp(QWidget):
             'steer': norm_steer,
             'speed': to_mph,
             'power': to_hp,
-            'torque': clamp_zero
+            'torque': clamp_zero,
+            'boost': clamp_zero
         }
 
         raw_snapshot = {}
@@ -352,6 +412,48 @@ class ForzaTelemetryApp(QWidget):
                 self.csv_writer.writerow(row)
                 self.log_file.flush()
 
+    def update_buffer_len(self):
+        try:
+            val = int(self.buffer_len_input.text())
+            if val <= 0:
+                raise ValueError
+        except ValueError:
+            self.log("Invalid buffer length. Must be a positive integer.")
+            return
+
+        for chart in self.charts.values():
+            chart.set_buffer_len(val)
+        self.log(f"Chart buffer length set to {val}")
+
+    def open_log_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open Log CSV", ".", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        try:
+            with open(path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                self.replay_data = list(reader)
+                self.replay_index = 0
+
+                for chart in self.charts.values():
+                    chart.data.clear()
+
+                if not hasattr(self, 'slider'):
+                    self.slider = QSlider(Qt.Horizontal)
+                    self.slider.setMinimum(0)
+                    self.slider.setMaximum(len(self.replay_data) - 1)
+                    self.slider.valueChanged.connect(self.update_replay_frame)
+                    self.layout().insertWidget(2, self.slider)
+                else:
+                    self.slider.setMaximum(len(self.replay_data) - 1)
+                    self.slider.setValue(0)
+
+                self.log(f"Loaded {len(self.replay_data)} frames from {path}")
+
+        except Exception as e:
+            self.log(f"Failed to read log file: {e}")
+
     def flush_data_buffer(self):
         for key, vals in self.data_buffer.items():
             if vals:
@@ -359,6 +461,36 @@ class ForzaTelemetryApp(QWidget):
                 if chart:
                     chart.add_values(list(vals))
                 vals.clear()
+                
+    def update_replay_frame(self, index):
+        if not hasattr(self, 'replay_data') or index >= len(self.replay_data):
+            return
+
+        window_size = 150
+        start = max(0, index - window_size + 1)
+        end = index + 1
+
+        for key, chart in self.charts.items():
+            # Extract windowed data for this key from replay_data
+            try:
+                # Slice replay frames in window
+                vals = []
+                for i in range(start, end):
+                    frame_val = self.replay_data[i].get(key, '')
+                    vals.append(float(frame_val) if frame_val else 0.0)
+
+                chart.data = deque(vals, maxlen=window_size)
+                chart.add_values(list(chart.data))
+                # Lock y-axis range to fit data, pad slightly if flat
+                mn, mx = min(chart.data), max(chart.data)
+                if mn == mx:
+                    mn -= 0.1
+                    mx += 0.1
+                chart.axis_y.setRange(mn, mx)
+                chart.axis_x.setRange(0, len(chart.data) - 1)
+
+            except ValueError:
+                continue
 
     def start(self):
         self.receiver.start()
@@ -377,6 +509,10 @@ class ForzaTelemetryApp(QWidget):
         self.log("Telemetry capture stopped.")
         if self.logging_enabled:
             self._stop_logging()
+
+        for chart in self.charts.values():
+            chart.data.clear()
+            chart.add_values([])
 
     def toggle_logging(self, checked):
         if checked:
